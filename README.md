@@ -20,7 +20,7 @@ jobs:
       pull-requests: write # for the PR comment
     steps:
       # ...build and export an ad-hoc signed IPA
-      - uses: kabiroberai/deploy-adhoc-ipa@main
+      - uses: kabiroberai/deploy-adhoc-ipa@v1
         with:
           ipa: out/MyApp.ipa
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
