@@ -1,18 +1,15 @@
 name: 'Deploy ad-hoc IPA'
-description: 'Publish an ad-hoc/enterprise IPA to Cloudflare R2 + Pages with an itms-services install link'
+description: 'Publish an ad-hoc/enterprise IPA to Cloudflare Pages with an itms-services install link'
 inputs:
   ipa:
     description: 'Path to the .ipa'
     required: true
   cloudflare-api-token:
-    description: 'Cloudflare API token with the Pages: Edit and Workers R2 Storage: Edit permissions'
+    description: 'Cloudflare API token with the Pages: Edit permission (and Workers R2 Storage: Edit for IPAs over 25 MiB)'
     required: true
   r2-bucket:
-    description: 'R2 bucket for IPAs; created if it does not exist. Defaults to the project name'
+    description: 'R2 bucket for IPAs over 25 MiB (the Pages per-file limit); created if it does not exist. Defaults to the project name'
     default: ''
-  r2-link-expiry-days:
-    description: 'How long R2 download links stay valid, in days (at most 7)'
-    default: '7'
   project-name:
     description: 'Cloudflare Pages project; created if it does not exist. Defaults to <repo name>-ipa-installer'
     default: ''
@@ -57,7 +54,7 @@ outputs:
     description: 'Download URL of the .ipa'
     value: ${{ steps.stage.outputs.ipa-url }}
   expires-at:
-    description: 'When the .ipa download link expires (ISO 8601)'
+    description: 'When the .ipa download link expires (ISO 8601), or empty if it does not'
     value: ${{ steps.stage.outputs.expires-at }}
 runs:
   using: composite
@@ -76,14 +73,13 @@ runs:
         TITLE: ${{ inputs.title }}
         COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         R2_BUCKET: ${{ inputs.r2-bucket }}
-        R2_LINK_EXPIRY_DAYS: ${{ inputs.r2-link-expiry-days }}
       run: |
         echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
         python3 "$GITHUB_ACTION_PATH/stage.py" \
           --ipa "$IPA" --out "$RUNNER_TEMP/deploy-adhoc-ipa" \
           --project "$PROJECT" --branch "$BRANCH" --production-branch "$PRODUCTION_BRANCH" \
           --base-url "$BASE_URL" --title "$TITLE" --commit "$COMMIT" \
-          --r2-bucket "$R2_BUCKET" --r2-link-expiry-days "$R2_LINK_EXPIRY_DAYS"
+          --r2-bucket "$R2_BUCKET"
     - name: Generate QR code
       shell: bash
       env:
@@ -139,8 +135,8 @@ runs:
         <tr><td>Name</td><td>$(escape "$TITLE")</td></tr>
         <tr><td>Version</td><td>$(escape "$VERSION")</td></tr>
         <tr><td>Commit</td><td><a href=\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$COMMIT\"><code>${COMMIT:0:7}</code></a></td></tr>
-        <tr><td>Expires</td><td>$EXPIRES</td></tr>
-        </table>"
+        ${EXPIRES:+<tr><td>Expires</td><td>$EXPIRES</td></tr>
+        }</table>"
         id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
           --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
         if [ -n "$id" ]; then

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-"""Upload an IPA to R2, and stage its itms-services manifest and an install page for Cloudflare Pages.
+"""Stage an IPA, its itms-services manifest, and an install page for Cloudflare Pages.
 
-The manifest points at a presigned (expiring) R2 download URL, which sidesteps
-the Pages per-file size limit.
+IPAs over the Pages per-file limit are uploaded to R2 instead, and the manifest
+points at a presigned (expiring) download URL.
 
 Writes `dir`, `page-dir`, `project`, `account-id`, `url`, `manifest-url`, `qr-url`, `install-url`,
 `ipa-url`, `expires-at`, `expires-display`, `title` and `version` to $GITHUB_OUTPUT (or stdout when run locally).
@@ -29,8 +29,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
-# SigV4 presigned URLs can't outlive a week.
-MAX_LINK_EXPIRY = timedelta(days=7)
+PAGES_FILE_LIMIT = 25 * 1024 * 1024
+# As long as SigV4 presigned URLs allow.
+LINK_EXPIRY = timedelta(days=7)
 
 
 def cloudflare(method, path, body=None, ok_errors=(404,)):
@@ -89,7 +90,7 @@ def ensure_bucket(account, bucket):
         "conditions": {"prefix": ""},
         "deleteObjectsTransition": {"condition": {
             "type": "Age",
-            "maxAge": int((MAX_LINK_EXPIRY + timedelta(days=1)).total_seconds()),
+            "maxAge": int((LINK_EXPIRY + timedelta(days=1)).total_seconds()),
         }},
     }]})
 
@@ -207,16 +208,15 @@ def main():
     parser.add_argument("--title", default="")
     parser.add_argument("--commit", default="")
     parser.add_argument("--r2-bucket", default="")
-    parser.add_argument("--r2-link-expiry-days", type=float, default=MAX_LINK_EXPIRY.days)
     args = parser.parse_args()
 
     project = args.project or default_project()
-    link_expiry = timedelta(days=args.r2_link_expiry_days)
-    if not timedelta(0) < link_expiry <= MAX_LINK_EXPIRY:
-        sys.exit(f"r2-link-expiry-days must be between 0 and {MAX_LINK_EXPIRY.days}")
+    use_r2 = args.ipa.stat().st_size > PAGES_FILE_LIMIT
 
-    account = account_id()
+    # With a custom base URL and no R2 upload, nothing here needs the API;
+    # wrangler resolves the account itself.
     base_url = args.base_url.rstrip("/")
+    account = account_id() if use_r2 or not base_url else ""
     if not base_url:
         host = pages_subdomain(account, project, args.production_branch)
         if args.branch != args.production_branch:
@@ -237,9 +237,14 @@ def main():
     shutil.rmtree(args.out, ignore_errors=True)
     page = args.out / token
     page.mkdir(parents=True)
-    ipa_url = upload_to_r2(account, args.r2_bucket or project, f"{token}/{args.ipa.name}", args.ipa, link_expiry)
-    expires_at = datetime.now(timezone.utc) + link_expiry
-    expires_display = f"{expires_at:%b %-d, %Y %H:%M} UTC"
+    expires_at = None
+    if use_r2:
+        ipa_url = upload_to_r2(account, args.r2_bucket or project, f"{token}/{args.ipa.name}", args.ipa, LINK_EXPIRY)
+        expires_at = datetime.now(timezone.utc) + LINK_EXPIRY
+    else:
+        shutil.copyfile(args.ipa, page / args.ipa.name)
+        ipa_url = f"{base_url}/{urllib.parse.quote(args.ipa.name)}"
+    expires_display = f"{expires_at:%b %-d, %Y %H:%M} UTC" if expires_at else ""
 
     manifest_url = f"{base_url}/manifest.plist"
     install_url = "itms-services://?action=download-manifest&url=" + urllib.parse.quote(manifest_url, safe="")
@@ -272,7 +277,7 @@ def main():
         bundle_id=html.escape(bundle_id),
         commit=html.escape(args.commit[:7]),
         install_url=html.escape(install_url),
-        expires=html.escape(expires_display),
+        expiry=f'<p class="meta">Link expires {html.escape(expires_display)}</p>' if expires_at else "",
     ))
 
     outputs = {
@@ -285,7 +290,7 @@ def main():
         "qr-url": f"{base_url}/qr.svg",
         "install-url": install_url,
         "ipa-url": ipa_url,
-        "expires-at": f"{expires_at:%Y-%m-%dT%H:%M:%SZ}",
+        "expires-at": f"{expires_at:%Y-%m-%dT%H:%M:%SZ}" if expires_at else "",
         "expires-display": expires_display,
         "title": title,
         "version": version,
