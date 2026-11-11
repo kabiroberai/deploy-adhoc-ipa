@@ -1,12 +1,18 @@
 name: 'Deploy ad-hoc IPA'
-description: 'Publish an ad-hoc/enterprise IPA to Cloudflare Pages with an itms-services install link'
+description: 'Publish an ad-hoc/enterprise IPA to Cloudflare R2 + Pages with an itms-services install link'
 inputs:
   ipa:
-    description: 'Path to the .ipa (at most 25 MiB, the Pages per-file limit)'
+    description: 'Path to the .ipa'
     required: true
   cloudflare-api-token:
-    description: 'Cloudflare API token with the Pages: Edit permission'
+    description: 'Cloudflare API token with the Pages: Edit and Workers R2 Storage: Edit permissions'
     required: true
+  r2-bucket:
+    description: 'R2 bucket for IPAs; created if it does not exist. Defaults to the project name'
+    default: ''
+  r2-link-expiry-days:
+    description: 'How long R2 download links stay valid, in days (at most 7)'
+    default: '7'
   project-name:
     description: 'Cloudflare Pages project; created if it does not exist. Defaults to <repo name>-ipa-installer'
     default: ''
@@ -47,6 +53,12 @@ outputs:
   qr-url:
     description: 'URL of an SVG QR code for the itms-services link'
     value: ${{ steps.stage.outputs.qr-url }}
+  ipa-url:
+    description: 'Download URL of the .ipa'
+    value: ${{ steps.stage.outputs.ipa-url }}
+  expires-at:
+    description: 'When the .ipa download link expires (ISO 8601)'
+    value: ${{ steps.stage.outputs.expires-at }}
 runs:
   using: composite
   steps:
@@ -63,12 +75,15 @@ runs:
         BASE_URL: ${{ inputs.base-url }}
         TITLE: ${{ inputs.title }}
         COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        R2_BUCKET: ${{ inputs.r2-bucket }}
+        R2_LINK_EXPIRY_DAYS: ${{ inputs.r2-link-expiry-days }}
       run: |
         echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
         python3 "$GITHUB_ACTION_PATH/stage.py" \
           --ipa "$IPA" --out "$RUNNER_TEMP/deploy-adhoc-ipa" \
           --project "$PROJECT" --branch "$BRANCH" --production-branch "$PRODUCTION_BRANCH" \
-          --base-url "$BASE_URL" --title "$TITLE" --commit "$COMMIT"
+          --base-url "$BASE_URL" --title "$TITLE" --commit "$COMMIT" \
+          --r2-bucket "$R2_BUCKET" --r2-link-expiry-days "$R2_LINK_EXPIRY_DAYS"
     - name: Generate QR code
       shell: bash
       env:
@@ -87,12 +102,14 @@ runs:
         BRANCH: ${{ steps.stage.outputs.branch }}
         COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         MANIFEST_URL: ${{ steps.stage.outputs.manifest-url }}
+        IPA_URL: ${{ steps.stage.outputs.ipa-url }}
         URL: ${{ steps.stage.outputs.url }}
       run: |
         npx --yes "wrangler@$WRANGLER_VERSION" pages deploy "$DIR" \
           --project-name "$PROJECT" --branch "$BRANCH" --commit-hash "$COMMIT" --commit-dirty=true
         # The manifest embeds absolute URLs, so make sure they're served where we expect.
         curl -fsS --retry 5 --retry-all-errors -o /dev/null "$MANIFEST_URL"
+        curl -fsS --retry 5 --retry-all-errors -r 0-0 -o /dev/null "$IPA_URL"
         echo "### Install page: $URL" >> "$GITHUB_STEP_SUMMARY"
     - name: Comment on pull request
       if: ${{ inputs.comment-on-pr == 'true' && github.event.pull_request.number }}
@@ -105,15 +122,25 @@ runs:
         VERSION: ${{ steps.stage.outputs.version }}
         URL: ${{ steps.stage.outputs.url }}
         QR_URL: ${{ steps.stage.outputs.qr-url }}
+        EXPIRES: ${{ steps.stage.outputs.expires-display }}
         COMMIT: ${{ github.event.pull_request.head.sha }}
       run: |
         marker="<!-- deploy-adhoc-ipa:$PROJECT -->"
+        escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<< "$1"; }
+        # GitHub strips itms-services:// links, so link to the install page; the QR code is the direct link.
         body="$marker
-        **$TITLE $VERSION** ad-hoc build for ${COMMIT:0:7}: [install]($URL)
+        ## Install this ipa
+
+        [Click here]($URL) on your registered iOS device or scan this QR code:
 
         <img src=\"$QR_URL\" width=\"160\" alt=\"QR code for the install link\">
 
-        Scan with the camera on a registered device, or open the link there in Safari."
+        <table>
+        <tr><td>Name</td><td>$(escape "$TITLE")</td></tr>
+        <tr><td>Version</td><td>$(escape "$VERSION")</td></tr>
+        <tr><td>Commit</td><td><a href=\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$COMMIT\"><code>${COMMIT:0:7}</code></a></td></tr>
+        <tr><td>Expires</td><td>$EXPIRES</td></tr>
+        </table>"
         id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
           --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
         if [ -n "$id" ]; then

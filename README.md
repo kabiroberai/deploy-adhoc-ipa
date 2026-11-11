@@ -1,13 +1,13 @@
 # deploy-adhoc-ipa
 
-A GitHub Action that uploads an ipa to [Cloudflare Pages](https://pages.cloudflare.com)
-and provides a one-click install link for devices registered to your Apple Developer account.
+A GitHub Action that takes an ad-hoc signed ipa and produces a one-click install link, for devices registered to your Apple Developer account. Uses Cloudflare Pages and R2.
 
 (Made with lots of help from Claude, but verified to work)
 
 ## Usage
 
 1. Create a Cloudflare API token with the **Account → Cloudflare Pages → Edit**
+   and **Account → Workers R2 Storage → Edit** permissions
 2. In your GitHub Workflow, build an `ad-hoc` signed ipa
 3. Invoke this action with the path to the ipa + the API token
 
@@ -36,8 +36,10 @@ If you're self-hosting a runner, install Python3, Node.js 22+, and `gh`.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `ipa` | **required** | Path to the `.ipa` (at most 25 MiB, the Pages per-file limit) |
-| `cloudflare-api-token` | **required** | Cloudflare API token with Pages: Edit |
+| `ipa` | **required** | Path to the `.ipa` |
+| `cloudflare-api-token` | **required** | Cloudflare API token with Pages: Edit and Workers R2 Storage: Edit |
+| `r2-bucket` | the project name | R2 bucket for IPAs |
+| `r2-link-expiry-days` | `7` | How long download links stay valid (at most 7) |
 | `project-name` | `<repo name>-ipa-installer` | Cloudflare Pages project |
 | `cloudflare-account-id` | inferred | Required only if the token can access multiple accounts |
 | `branch` | `pr-<number>` or the ref name | Pages branch to deploy to |
@@ -56,6 +58,8 @@ If you're self-hosting a runner, install Python3, Node.js 22+, and `gh`.
 | `manifest-url` | URL of `manifest.plist` |
 | `install-url` | The `itms-services://` link |
 | `qr-url` | URL of an SVG QR code for the `itms-services://` link |
+| `ipa-url` | Download URL of the `.ipa` |
+| `expires-at` | When the `.ipa` download link expires (ISO 8601) |
 
 ## Notes
 
