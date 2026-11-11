@@ -1,0 +1,123 @@
+name: 'Deploy ad-hoc IPA'
+description: 'Publish an ad-hoc/enterprise IPA to Cloudflare Pages with an itms-services install link'
+inputs:
+  ipa:
+    description: 'Path to the .ipa (at most 25 MiB, the Pages per-file limit)'
+    required: true
+  cloudflare-api-token:
+    description: 'Cloudflare API token with the Pages: Edit permission'
+    required: true
+  project-name:
+    description: 'Cloudflare Pages project; created if it does not exist. Defaults to <repo name>-ipa-installer'
+    default: ''
+  cloudflare-account-id:
+    description: 'Cloudflare account ID. Required if the token can access multiple accounts'
+    default: ''
+  branch:
+    description: 'Pages branch to deploy to. Defaults to pr-<number> for pull requests, otherwise the ref name'
+    default: ''
+  production-branch:
+    description: 'Production branch for a newly created project'
+    default: 'main'
+  base-url:
+    description: 'Public URL the deployment is served from, e.g. a custom domain. Defaults to the pages.dev URL for the branch'
+    default: ''
+  title:
+    description: 'Title shown on the page and in the iOS install prompt. Defaults to the app name'
+    default: ''
+  comment-on-pr:
+    description: 'Post (and keep updating) a comment with the install link on pull requests. Needs pull-requests: write'
+    default: 'true'
+  github-token:
+    description: 'Token used to comment on pull requests'
+    default: ${{ github.token }}
+  wrangler-version:
+    description: 'Version of wrangler to deploy with'
+    default: '4.153.0'
+outputs:
+  url:
+    description: 'URL of the install page'
+    value: ${{ steps.stage.outputs.url }}
+  manifest-url:
+    description: 'URL of manifest.plist'
+    value: ${{ steps.stage.outputs.manifest-url }}
+  install-url:
+    description: 'itms-services:// link'
+    value: ${{ steps.stage.outputs.install-url }}
+  qr-url:
+    description: 'URL of an SVG QR code for the itms-services link'
+    value: ${{ steps.stage.outputs.qr-url }}
+runs:
+  using: composite
+  steps:
+    - name: Stage install page
+      id: stage
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare-api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare-account-id }}
+        IPA: ${{ inputs.ipa }}
+        PROJECT: ${{ inputs.project-name }}
+        BRANCH: ${{ inputs.branch || (github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number)) || github.ref_name }}
+        PRODUCTION_BRANCH: ${{ inputs.production-branch }}
+        BASE_URL: ${{ inputs.base-url }}
+        TITLE: ${{ inputs.title }}
+        COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/stage.py" \
+          --ipa "$IPA" --out "$RUNNER_TEMP/deploy-adhoc-ipa" \
+          --project "$PROJECT" --branch "$BRANCH" --production-branch "$PRODUCTION_BRANCH" \
+          --base-url "$BASE_URL" --title "$TITLE" --commit "$COMMIT"
+    - name: Generate QR code
+      shell: bash
+      env:
+        PAGE_DIR: ${{ steps.stage.outputs.page-dir }}
+        INSTALL_URL: ${{ steps.stage.outputs.install-url }}
+      run: |
+        npx --yes qrcode@1.5.4 --error M --qzone 2 --width 200 --output "$PAGE_DIR/qr.svg" "$INSTALL_URL"
+    - name: Deploy to Cloudflare Pages
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare-api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare-account-id || steps.stage.outputs.account-id }}
+        WRANGLER_VERSION: ${{ inputs.wrangler-version }}
+        DIR: ${{ steps.stage.outputs.dir }}
+        PROJECT: ${{ steps.stage.outputs.project }}
+        BRANCH: ${{ steps.stage.outputs.branch }}
+        COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        MANIFEST_URL: ${{ steps.stage.outputs.manifest-url }}
+        URL: ${{ steps.stage.outputs.url }}
+      run: |
+        npx --yes "wrangler@$WRANGLER_VERSION" pages deploy "$DIR" \
+          --project-name "$PROJECT" --branch "$BRANCH" --commit-hash "$COMMIT" --commit-dirty=true
+        # The manifest embeds absolute URLs, so make sure they're served where we expect.
+        curl -fsS --retry 5 --retry-all-errors -o /dev/null "$MANIFEST_URL"
+        echo "### Install page: $URL" >> "$GITHUB_STEP_SUMMARY"
+    - name: Comment on pull request
+      if: ${{ inputs.comment-on-pr == 'true' && github.event.pull_request.number }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        PROJECT: ${{ steps.stage.outputs.project }}
+        TITLE: ${{ steps.stage.outputs.title }}
+        VERSION: ${{ steps.stage.outputs.version }}
+        URL: ${{ steps.stage.outputs.url }}
+        QR_URL: ${{ steps.stage.outputs.qr-url }}
+        COMMIT: ${{ github.event.pull_request.head.sha }}
+      run: |
+        marker="<!-- deploy-adhoc-ipa:$PROJECT -->"
+        body="$marker
+        **$TITLE $VERSION** ad-hoc build for ${COMMIT:0:7}: [install]($URL)
+
+        <img src=\"$QR_URL\" width=\"160\" alt=\"QR code for the install link\">
+
+        Scan with the camera on a registered device, or open the link there in Safari."
+        id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+          --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null
+        else
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null
+        fi
